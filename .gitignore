@@ -38,3 +38,9 @@ dist/
 # project dirs
 /datasets
 /models
+
+# MacOS Folder
+__MACOSX/
+
+# dataset
+balloon/

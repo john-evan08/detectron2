@@ -1,4 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+import os
+import cv2
+import json
 import bisect
 import copy
 import itertools
@@ -20,6 +23,8 @@ from .catalog import DatasetCatalog, MetadataCatalog
 from .common import DatasetFromList, MapDataset
 from .dataset_mapper import DatasetMapper
 from .detection_utils import check_metadata_consistency
+
+DATASET_PATH = "/home/ubuntu/detectron2/balloon/"
 
 """
 This file contains the default logic to build a dataloader for training or testing.
@@ -253,6 +258,9 @@ def get_detection_dataset_dicts(
             that match each dataset in `dataset_names`.
     """
     assert len(dataset_names)
+    for d in ["train", "val"]:
+        DatasetCatalog.register("balloon/" + d, lambda d=d: get_balloon_dicts(DATASET_PATH + d))
+        MetadataCatalog.get("balloon/" + d).set(thing_classes=["balloon"])
     dataset_dicts = [DatasetCatalog.get(dataset_name) for dataset_name in dataset_names]
 
     if proposal_files is not None:
@@ -415,3 +423,41 @@ def trivial_batch_collator(batch):
 
 def worker_init_reset_seed(worker_id):
     seed_all_rng(np.random.randint(2 ** 31) + worker_id)
+
+def get_balloon_dicts(img_dir):
+    json_file = os.path.join(img_dir, "via_region_data.json")
+    with open(json_file) as f:
+        imgs_anns = json.load(f)
+
+    dataset_dicts = []
+    for _, v in imgs_anns.items():
+        record = {}
+        
+        filename = os.path.join(img_dir, v["filename"])
+        height, width = cv2.imread(filename).shape[:2]
+        
+        record["file_name"] = filename
+        record["height"] = height
+        record["width"] = width
+      
+        annos = v["regions"]
+        objs = []
+        for _, anno in annos.items():
+            assert not anno["region_attributes"]
+            anno = anno["shape_attributes"]
+            px = anno["all_points_x"]
+            py = anno["all_points_y"]
+            poly = [(x + 0.5, y + 0.5) for x, y in zip(px, py)]
+            poly = list(itertools.chain.from_iterable(poly))
+
+            obj = {
+                "bbox": [np.min(px), np.min(py), np.max(px), np.max(py)],
+                "bbox_mode": BoxMode.XYXY_ABS,
+                "segmentation": [poly],
+                "category_id": 0,
+                "iscrowd": 0
+            }
+            objs.append(obj)
+        record["annotations"] = objs
+        dataset_dicts.append(record)
+    return dataset_dicts
