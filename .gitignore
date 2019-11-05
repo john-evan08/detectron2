@@ -41,6 +41,3 @@ dist/
 
 # MacOS Folder
 __MACOSX/
-
-# dataset
-balloon/

@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
+import contextlib
+import copy
+import io
 import logging
 import numpy as np
 import os
@@ -9,8 +12,10 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict, defaultdict
 from functools import lru_cache
 import torch
+from fvcore.common.file_io import PathManager
 
-from detectron2.data import MetadataCatalog
+
+from detectron2.data import MetadataCatalog, get_VOC_XML
 from detectron2.utils import comm
 
 from .evaluator import DatasetEvaluator
@@ -26,7 +31,7 @@ class PascalVOCDetectionEvaluator(DatasetEvaluator):
     the official API.
     """
 
-    def __init__(self, dataset_name):
+    def __init__(self, dataset_name, output_dir):
         """
         Args:
             dataset_name (str): name of the dataset, e.g., "voc_2007_test"
@@ -34,23 +39,33 @@ class PascalVOCDetectionEvaluator(DatasetEvaluator):
         self._dataset_name = dataset_name
         meta = MetadataCatalog.get(dataset_name)
         self._anno_file_template = os.path.join(meta.dirname, "Annotations", "{}.xml")
-        self._image_set_path = os.path.join(meta.dirname, "ImageSets", "Main", meta.split + ".txt")
+        self._image_set_path = os.path.join(meta.dirname, meta.split, "val.txt")
         self._class_names = meta.thing_classes
         assert meta.year in [2007, 2012], meta.year
         self._is_2007 = meta.year == 2007
         self._cpu_device = torch.device("cpu")
         self._logger = logging.getLogger(__name__)
+        self._output_dir = output_dir
 
     def reset(self):
         self._predictions = defaultdict(list)  # class name -> list of prediction strings
+        self._pred_dicts = []
+
 
     def process(self, inputs, outputs):
         for input, output in zip(inputs, outputs):
-            image_id = input["image_id"]
+            record = {}
+            file_name = input["file_name"]
+            record["file_name"] = file_name
+            record["height"] = input["height"]
+            record["width"] = input["width"]
+            objects=[]
+            image_id = os.path.basename(file_name).replace('.jpg', '')
             instances = output["instances"].to(self._cpu_device)
             boxes = instances.pred_boxes.tensor.numpy()
             scores = instances.scores.tolist()
             classes = instances.pred_classes.tolist()
+
             for box, score, cls in zip(boxes, scores, classes):
                 xmin, ymin, xmax, ymax = box
                 # The inverse of data loading logic in `datasets/pascal_voc.py`
@@ -59,6 +74,15 @@ class PascalVOCDetectionEvaluator(DatasetEvaluator):
                 self._predictions[cls].append(
                     f"{image_id} {score:.3f} {xmin:.1f} {ymin:.1f} {xmax:.1f} {ymax:.1f}"
                 )
+                objects.append({
+                    "bbox":[xmin,ymin,xmax,ymax],
+                    "bbox_mode":'<XYXY>',
+                    "category_id": 0,
+                    "score":score
+                })
+            record["annotations"]=objects
+            self._pred_dicts.append(record)
+        print(self._pred_dicts[0:2])
 
     def evaluate(self):
         """
@@ -75,11 +99,18 @@ class PascalVOCDetectionEvaluator(DatasetEvaluator):
         del all_predictions
 
         self._logger.info(
-            "Evaluating {} using {} metric. "
-            "Note that results do not use the official Matlab API.".format(
-                self._dataset_name, 2007 if self._is_2007 else 2012
-            )
+            "Saving the predictions as pth and XML files"
         )
+
+        if self._output_dir:
+            PathManager.mkdirs(self._output_dir)
+            file_path = os.path.join(self._output_dir, "instances_predictions.pth")
+            with PathManager.open(file_path, "wb") as f:
+                torch.save(predictions, f)   
+            get_VOC_XML(self._pred_dicts, self._output_dir)   
+
+
+
 
         with tempfile.TemporaryDirectory(prefix="pascal_voc_eval_") as dirname:
             res_file_template = os.path.join(dirname, "{}.txt")
@@ -215,7 +246,7 @@ def voc_eval(detpath, annopath, imagesetfile, classname, ovthresh=0.5, use_07_me
     class_recs = {}
     npos = 0
     for imagename in imagenames:
-        R = [obj for obj in recs[imagename] if obj["name"] == classname]
+        R = [obj for obj in recs[imagename] if obj["name"].lower() == classname.lower()]
         bbox = np.array([x["bbox"] for x in R])
         difficult = np.array([x["difficult"] for x in R]).astype(np.bool)
         # difficult = np.array([False for x in R]).astype(np.bool)  # treat all "difficult" as GT
@@ -290,3 +321,7 @@ def voc_eval(detpath, annopath, imagesetfile, classname, ovthresh=0.5, use_07_me
     ap = voc_ap(rec, prec, use_07_metric)
 
     return rec, prec, ap
+
+    
+
+

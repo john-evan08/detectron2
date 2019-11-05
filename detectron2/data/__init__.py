@@ -7,6 +7,7 @@ from .build import (
     get_detection_dataset_dicts,
     load_proposals_into_dataset,
     print_instances_class_histogram,
+    get_VOC_XML
 )
 from .catalog import DatasetCatalog, MetadataCatalog
 from .common import DatasetFromList, MapDataset

@@ -1,4 +1,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+import xml.etree.ElementTree as ET
+from xml.dom import minidom
+
+import glob
 import os
 import cv2
 import json
@@ -24,7 +28,8 @@ from .common import DatasetFromList, MapDataset
 from .dataset_mapper import DatasetMapper
 from .detection_utils import check_metadata_consistency
 
-DATASET_PATH = "/home/ubuntu/detectron2/balloon/"
+DATASET_PATH = "/home/ubuntu/detectron2/datasets/SNF_TEST/"
+DATASET_NAME = "SNF_TEST/"
 
 """
 This file contains the default logic to build a dataloader for training or testing.
@@ -36,6 +41,7 @@ __all__ = [
     "get_detection_dataset_dicts",
     "load_proposals_into_dataset",
     "print_instances_class_histogram",
+    "get_VOC_XML"
 ]
 
 
@@ -259,8 +265,9 @@ def get_detection_dataset_dicts(
     """
     assert len(dataset_names)
     for d in ["train", "val"]:
-        DatasetCatalog.register("balloon/" + d, lambda d=d: get_balloon_dicts(DATASET_PATH + d))
-        MetadataCatalog.get("balloon/" + d).set(thing_classes=["balloon"])
+        DatasetCatalog.register(DATASET_NAME + d, lambda d=d: get_VOC_dict(DATASET_PATH + d))
+        MetadataCatalog.get(DATASET_NAME + d).set(thing_classes=["BOX"], dirname=DATASET_PATH, split='ImageSets', year=2012)
+
     dataset_dicts = [DatasetCatalog.get(dataset_name) for dataset_name in dataset_names]
 
     if proposal_files is not None:
@@ -270,7 +277,6 @@ def get_detection_dataset_dicts(
             load_proposals_into_dataset(dataset_i_dicts, proposal_file)
             for dataset_i_dicts, proposal_file in zip(dataset_dicts, proposal_files)
         ]
-
     dataset_dicts = list(itertools.chain.from_iterable(dataset_dicts))
 
     has_instances = "annotations" in dataset_dicts[0]
@@ -424,40 +430,128 @@ def trivial_batch_collator(batch):
 def worker_init_reset_seed(worker_id):
     seed_all_rng(np.random.randint(2 ** 31) + worker_id)
 
-def get_balloon_dicts(img_dir):
-    json_file = os.path.join(img_dir, "via_region_data.json")
-    with open(json_file) as f:
-        imgs_anns = json.load(f)
+def get_VOC_dict(dataset_path):
+
+    JPEGImages_folder = os.path.join(dataset_path,'JPEGImages')
+    Annotations_folder = os.path.join(dataset_path,'Annotations')
 
     dataset_dicts = []
-    for _, v in imgs_anns.items():
+    
+    for image in glob.glob(os.path.join(JPEGImages_folder, '*.jpg')):
         record = {}
-        
-        filename = os.path.join(img_dir, v["filename"])
+        filename = os.path.join(image)
         height, width = cv2.imread(filename).shape[:2]
-        
         record["file_name"] = filename
         record["height"] = height
         record["width"] = width
-      
-        annos = v["regions"]
+        
+        image_basename = os.path.basename(image)
+        annotationPath = os.path.join(Annotations_folder, image_basename.replace('.jpg','.xml'))
+        
+        tree = ET.parse(annotationPath)
+        
         objs = []
-        for _, anno in annos.items():
-            assert not anno["region_attributes"]
-            anno = anno["shape_attributes"]
-            px = anno["all_points_x"]
-            py = anno["all_points_y"]
-            poly = [(x + 0.5, y + 0.5) for x, y in zip(px, py)]
-            poly = list(itertools.chain.from_iterable(poly))
+        for obj in tree.findall("object"):
+            label = obj.find("name").text
+            bndbox = obj.find('bndbox')
+            xmin = int(bndbox.find('xmin').text)
+            xmax = int(bndbox.find('xmax').text)
+            ymin = int(bndbox.find('ymin').text)
+            ymax = int(bndbox.find('ymax').text)
 
-            obj = {
-                "bbox": [np.min(px), np.min(py), np.max(px), np.max(py)],
+            objs.append({
+                "bbox": [xmin, ymin, xmax, ymax],
                 "bbox_mode": BoxMode.XYXY_ABS,
-                "segmentation": [poly],
                 "category_id": 0,
-                "iscrowd": 0
-            }
-            objs.append(obj)
+            })
         record["annotations"] = objs
         dataset_dicts.append(record)
     return dataset_dicts
+
+def get_VOC_XML(dataset_dicts, output):
+    print("creating XML from dicts")
+    PathManager.mkdirs(os.path.join(output, "Annotations_New"))
+    for dict in dataset_dicts:
+        image_path = dict["file_name"]
+        im = (dict["height"],dict["width"])
+        save_planogram_compliance(im,image_path,dict["annotations"], output)
+
+def prettify(elem):
+    """Return a pretty-printed XML string for the Element.
+    """
+    rough_string = ET.tostring(elem, 'utf-8')
+    reparsed = minidom.parseString(rough_string)
+    return reparsed.toprettyxml(indent="  ")
+
+def setupXML(im, image_name, im_is_size=True):
+    """"
+    if im_is_size is False, then im is supposed to be an image
+    Otherwise, im is supposed to be a tuple, (height, width) of desired image
+    """
+
+    annotation = ET.Element("annotation")
+    folder = ET.SubElement(annotation, "folder")
+    folder.text = "JPEGImages"
+    filename = ET.SubElement(annotation, "filename")
+    filename.text = os.path.basename(image_name)
+    path = ET.SubElement(annotation, "path")
+    path.text = image_name
+    source = ET.SubElement(annotation, "source")
+    database = ET.SubElement(source, "database")
+    database.text = "Unknown"
+    size = ET.SubElement(annotation, "size")
+
+    if not im_is_size:
+        try:
+            height, width, depth = im.shape
+        except:
+            width, height = im.size
+            depth = 3
+    else:
+        height, width = im
+        depth = 3
+
+    width_elem = ET.SubElement(size, "width")
+    width_elem.text = str(width)
+    height_elem = ET.SubElement(size, "height")
+    height_elem.text = str(height)
+    depth_elem = ET.SubElement(size, "depth")
+    depth_elem.text = str(depth)
+    segmented = ET.SubElement(annotation, "segmented")
+    segmented.text = "0"
+    return annotation
+
+def add_boxes(top, boxes):
+    """Draw detected bounding boxes."""
+
+    for box in boxes:
+        [x1,y1,x2,y2]=box["bbox"]
+        score = box["score"]
+        obj = ET.SubElement(top, "object")
+        name = ET.SubElement(obj, "name")
+        name.text = "BOX"
+        pose = ET.SubElement(obj, "pose")
+        pose.text = "Unspecified"
+        truncated = ET.SubElement(obj, "truncated")
+        truncated.text = "0"
+        difficult = ET.SubElement(obj, "difficult")
+        difficult.text = "0"
+        confidence = ET.SubElement(obj, "confidence")
+        confidence.text = str(score)
+        bndbox = ET.SubElement(obj, "bndbox")
+        xmin = ET.SubElement(bndbox, "xmin")
+        xmin.text = str(x1)
+        ymin = ET.SubElement(bndbox, "ymin")
+        ymin.text = str(y1)
+        xmax = ET.SubElement(bndbox, "xmax")
+        xmax.text = str(x2)
+        ymax = ET.SubElement(bndbox, "ymax")
+        ymax.text = str(y2)
+        
+def save_planogram_compliance(im, file_name, boxes, output):
+    
+    top = setupXML(im, file_name)
+    add_boxes(top, boxes)
+    annotation_path = os.path.join(output, "Annotations_New", os.path.basename(file_name).replace(".jpg", ".xml"))
+    with open(annotation_path,'w') as xmlfile:
+        xmlfile.write(prettify(top))
